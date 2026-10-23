@@ -33,3 +33,8 @@ LLM_API_KEY=<your key>          # never commit this
 - `research_agent/` – the engine: PDF loading, cleaning, chunking, embeddings, vector store, retrieval, RAG
 - `streamlit_app.py` – web UI · `api/` – FastAPI · `research.py` – CLI · `chat.py` – plain chat
 - `eval/` + `check_*.py` – retrieval and behaviour checks
+
+## License
+
+[AGPL-3.0](LICENSE). The project uses PyMuPDF, which is AGPL-licensed: if you run a modified version
+as a public web service, you must make its source code available.
