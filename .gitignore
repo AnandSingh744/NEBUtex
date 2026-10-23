@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded models (fetched automatically on first run)
+models/
+
+# Your documents, extracted text, vectors and search index:
+# personal/copyrighted content, and all rebuildable from the PDFs
+data/
+
+# Secrets: never commit these
+.env
+.streamlit/secrets.toml
+
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/

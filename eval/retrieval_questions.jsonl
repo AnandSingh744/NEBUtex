@@ -1,0 +1,16 @@
+{"question": "How many layers does the Transformer's encoder stack have?", "source": "attention_is_all_you_need.pdf", "pages": [3]}
+{"question": "Why are the dot products divided by the square root of the key dimension?", "source": "attention_is_all_you_need.pdf", "pages": [4]}
+{"question": "How many parallel attention heads does the base model use?", "source": "attention_is_all_you_need.pdf", "pages": [5]}
+{"question": "What is the inner dimension of the position-wise feed-forward network?", "source": "attention_is_all_you_need.pdf", "pages": [5]}
+{"question": "How does the model know the order of the tokens in a sequence?", "source": "attention_is_all_you_need.pdf", "pages": [6]}
+{"question": "What hardware was used to train the models and for how long?", "source": "attention_is_all_you_need.pdf", "pages": [7]}
+{"question": "How was the learning rate changed during training?", "source": "attention_is_all_you_need.pdf", "pages": [7]}
+{"question": "What regularization was applied during training?", "source": "attention_is_all_you_need.pdf", "pages": [7, 8]}
+{"question": "Does the Transformer work on tasks other than translation?", "source": "attention_is_all_you_need.pdf", "pages": [9, 10]}
+{"question": "What is the difference between RAG-Sequence and RAG-Token?", "source": "rag_lewis_2020.pdf", "pages": [2, 3]}
+{"question": "Which pre-trained model is used to initialize the retriever?", "source": "rag_lewis_2020.pdf", "pages": [2, 3], "note": "p2 also names DPR as the retriever; label widened after inspection"}
+{"question": "Which model generates the output text?", "source": "rag_lewis_2020.pdf", "pages": [3]}
+{"question": "Is the document encoder updated during fine-tuning?", "source": "rag_lewis_2020.pdf", "pages": [4]}
+{"question": "What corpus is used as the knowledge source, and how is it split into documents?", "source": "rag_lewis_2020.pdf", "pages": [4]}
+{"question": "Can the model's knowledge be updated without retraining it?", "source": "rag_lewis_2020.pdf", "pages": [7]}
+{"question": "Which library is used for fast nearest-neighbour search over the documents?", "source": "rag_lewis_2020.pdf", "pages": [4]}

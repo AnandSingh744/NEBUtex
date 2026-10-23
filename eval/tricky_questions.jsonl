@@ -1,0 +1,6 @@
+{"question": "How many GPUs were used to train RAG?", "expected": ["answered"], "why": "control: answerable, but only in the appendix (p17: 8 x 32GB V100)"}
+{"question": "What is the capital of France?", "expected": ["not_found"], "why": "control: completely unrelated to the documents"}
+{"question": "What BLEU score did the Transformer achieve on English-to-Japanese translation?", "expected": ["not_found"], "why": "near-miss: only English-German and English-French are reported"}
+{"question": "What learning rate did the RAG paper use?", "expected": ["not_found"], "why": "cross-document trap: only the Attention paper gives a learning rate"}
+{"question": "Why did the Transformer use LSTM layers in its encoder?", "expected": ["answered"], "why": "false premise: the answer should say the Transformer uses no recurrence, with a citation"}
+{"question": "How many attention heads does the base Transformer use, and how many parameters does GPT-3 have?", "expected": ["partial"], "why": "half answerable: heads yes (8), GPT-3 parameters no"}

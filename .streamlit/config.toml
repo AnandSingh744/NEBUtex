@@ -1,0 +1,7 @@
+[server]
+# Match the engine's upload limit (MB).
+maxUploadSize = 50
+
+[browser]
+# Don't send anonymous usage statistics to Streamlit.
+gatherUsageStats = false
