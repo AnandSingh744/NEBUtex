@@ -48,8 +48,8 @@ def get_store() -> VectorStore:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def llm_is_available() -> bool:
-    return llm_client.is_available()  # re-checked at most every 30 seconds, not on every click
+def llm_status() -> tuple[bool, str]:
+    return llm_client.check_llm()  # (ok, reason); re-checked at most every 30 seconds, not on every click
 
 
 def show_markdown(text: str, target=st) -> None:
@@ -109,9 +109,9 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    if not llm_is_available():
-        fix = "Start it with `ollama serve`." if config.LLM_PROVIDER == "ollama" else "Check LLM_API_KEY in the app's secrets."
-        st.error(f"The language model ({config.MODEL}) isn't reachable. {fix}")
+    llm_ok, llm_problem = llm_status()
+    if not llm_ok:
+        st.error(f"The language model ({config.MODEL}) isn't available. {llm_problem}")
 
 # ---------- Main area: chat ----------
 st.title("Personal Research Agent")

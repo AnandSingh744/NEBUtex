@@ -59,13 +59,29 @@ def _get_openai_client() -> openai.OpenAI:
 
 def is_available() -> bool:
     """Is the LLM reachable, and does it have our model? Used by health checks."""
+    return check_llm()[0]
+
+
+def check_llm() -> tuple[bool, str]:
+    """Like is_available(), but also says WHY it isn't available, so problems can be fixed quickly."""
     try:
         if config.LLM_PROVIDER == "ollama":
-            return any(m.model == config.MODEL for m in _ollama_client.list().models)
-        return any(m.id == config.MODEL for m in _get_openai_client().models.list())
-    except (LLMError, ConnectionError, httpx.TransportError, ollama.ResponseError,
-            openai.APIStatusError, openai.APIConnectionError):
-        return False
+            names = [m.model for m in _ollama_client.list().models]
+        else:
+            names = [m.id for m in _get_openai_client().models.list()]
+    except LLMError as e:  # e.g. no API key set
+        return False, str(e)
+    except openai.AuthenticationError:
+        return False, "The API key was rejected (401). Re-copy it into LLM_API_KEY, with no extra spaces."
+    except openai.APIStatusError as e:
+        return False, f"The LLM service returned an error ({e.status_code})."
+    except (ConnectionError, httpx.TransportError, ollama.ResponseError, openai.APIConnectionError):
+        return False, _unreachable_message()
+
+    if config.MODEL not in names:
+        similar = [n for n in names if "llama" in n.lower()] or names
+        return False, f"Model '{config.MODEL}' isn't offered. Set LLM_MODEL to one of: {', '.join(sorted(similar)[:8])}"
+    return True, "ok"
 
 
 def chat(
@@ -213,6 +229,8 @@ def _chat_once_openai(
         "temperature": config.TEMPERATURE,
         "max_tokens": config.MAX_OUTPUT_TOKENS,
     }
+    if config.LLM_REASONING_EFFORT:
+        params["reasoning_effort"] = config.LLM_REASONING_EFFORT
     start = time.perf_counter()
 
     if on_token is None:

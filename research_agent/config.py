@@ -23,9 +23,13 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
-# Default model per provider: the same Llama 3.1 8B locally (Ollama) and on Groq.
-# Use "llama3.2:3b" with Ollama for faster (but weaker) answers while testing.
-MODEL = os.getenv("LLM_MODEL", "llama3.1:8b" if LLM_PROVIDER == "ollama" else "llama-3.1-8b-instant")
+# Default model per provider. Hosted models get retired (Groq retired llama-3.1-8b-instant in
+# Aug 2026), so override with LLM_MODEL when needed. Locally, "llama3.2:3b" is faster but weaker.
+MODEL = os.getenv("LLM_MODEL", "llama3.1:8b" if LLM_PROVIDER == "ollama" else "openai/gpt-oss-20b")
+
+# Reasoning models (like gpt-oss) "think" before answering, and that thinking counts toward
+# MAX_OUTPUT_TOKENS. "low" keeps it short. Empty = don't send the setting (for other models).
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low" if "gpt-oss" in MODEL else "")
 
 # 0 = always pick the most likely token (deterministic); higher = more varied.
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
