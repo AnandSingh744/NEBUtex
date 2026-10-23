@@ -18,6 +18,10 @@ from research_agent.retriever import ChromaRetriever, SearchResult
 # reference numbers like [12]. Matches [S1], [S2, S3] or [S2,S3]; [S1][S4] is two matches.
 CITATION = re.compile(r"\[(S\d+(?:\s*,\s*S\d+)*)\]")
 
+# Some models write citations differently: OpenAI's gpt-oss uses 【S1】 or 【S1†L10-L20】, some use
+# full-width ［S1］. normalize_citations() rewrites these to the standard [S1] before parsing.
+ALT_CITATION = re.compile(r"[【［]\s*(S\d+(?:\s*[,，]\s*S\d+)*)[^】］]*[】］]")
+
 
 @dataclass
 class RAGAnswer:
@@ -64,6 +68,11 @@ def build_rag_messages(question: str, sources: list[SearchResult]) -> list[dict]
     ]
 
 
+def normalize_citations(text: str) -> str:
+    """【S1】, 【S1†L10-L20】, ［S1］ -> [S1], so every model's citations look and parse the same."""
+    return ALT_CITATION.sub(lambda m: "[" + m.group(1).replace("，", ",") + "]", text)
+
+
 def parse_citations(text: str, num_sources: int) -> tuple[list[int], list[int]]:
     """Split the source numbers cited in the answer into (valid, invalid), each sorted and unique."""
     numbers = {int(label.strip()[1:]) for match in CITATION.findall(text) for label in match.split(",")}
@@ -88,10 +97,11 @@ def answer(
     sources = select_sources(retriever.search(question, k=k, source=source))
     messages = build_rag_messages(question, sources)
     response = chat(messages, on_token=on_token)
-    cited, invalid = parse_citations(response.text, len(sources))
+    text = normalize_citations(response.text)
+    cited, invalid = parse_citations(text, len(sources))
     return RAGAnswer(
         question=question,
-        text=response.text,
+        text=text,
         sources=sources,
         cited=cited,
         invalid_citations=invalid,
