@@ -41,6 +41,9 @@ class DocumentStore(Protocol):
     def keyword_search(self, query: str, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
         """Chunks matching the query's words (full-text search), best first. May be empty if unsupported."""
 
+    def document_chunks(self, name: str) -> list[Chunk]:
+        """All chunks of one document, in reading order (empty if it doesn't exist)."""
+
     def load_corpus(self) -> tuple[list[Chunk], np.ndarray]:
         """Every chunk and its vector (row i belongs to chunk i). For exact-search baselines and evaluation."""
 

@@ -127,9 +127,12 @@ def save_cache() -> None:
         os.replace(tmp, _cache_path)
 
 
-def _cache_key(messages: list[dict], model: str, max_tokens: int, tools: list[dict] | None = None) -> str:
+def _cache_key(messages: list[dict], model: str, max_tokens: int, tools: list[dict] | None = None,
+               json_mode: bool = False) -> str:
     # Everything that can change the reply goes into the key.
     request = [config.LLM_PROVIDER, config.LLM_BASE_URL, model, max_tokens, config.LLM_REASONING_EFFORT, messages, tools]
+    if json_mode:
+        request.append("json")
     return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
 
 
@@ -140,6 +143,7 @@ def chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
+    json_mode: bool = False,
 ) -> LLMResponse:
     """Send a list of {"role", "content"} messages and return the model's reply.
 
@@ -149,6 +153,8 @@ def chat(
     temperature overrides config.TEMPERATURE for this call (e.g. 0 for consistent grading).
     max_tokens overrides config.MAX_OUTPUT_TOKENS (e.g. a small cap for short JSON replies, so a
     model stuck repeating itself is cut off early).
+    json_mode: force the reply to be valid JSON (constrained decoding: tokens that would break
+    the JSON are not allowed), instead of just asking for JSON in the prompt.
     tools: functions the model may ask to call (JSON Schema, OpenAI format). If it does, the reply has
     tool_calls instead of (or as well as) text. Messages may include the neutral forms
     {"role": "assistant", "content", "tool_calls": [ToolCall dicts]} and
@@ -160,7 +166,7 @@ def chat(
     effective_temperature = config.TEMPERATURE if temperature is None else temperature
     max_tokens = max_tokens or config.MAX_OUTPUT_TOKENS
     if _cache is not None and effective_temperature == 0:
-        key = _cache_key(messages, model, max_tokens, tools)
+        key = _cache_key(messages, model, max_tokens, tools, json_mode)
         with _cache_lock:
             hit = _cache.get(key)
         if hit is not None:
@@ -168,7 +174,7 @@ def chat(
             if on_token:
                 on_token(response.text)  # streaming callers still receive the text
             return response
-        response = _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools)
+        response = _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools, json_mode)
         global _unsaved
         with _cache_lock:
             _cache[key] = asdict(response)
@@ -177,12 +183,12 @@ def chat(
         if save_now:
             save_cache()
         return response
-    return _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools)
+    return _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools, json_mode)
 
 
 def _chat_with_retries(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None,
-    temperature: float | None, max_tokens: int, tools: list[dict] | None = None,
+    temperature: float | None, max_tokens: int, tools: list[dict] | None = None, json_mode: bool = False,
 ) -> LLMResponse:
     for attempt in range(1, config.MAX_ATTEMPTS + 1):
         stream_started = False
@@ -195,7 +201,7 @@ def _chat_with_retries(
         try:
             # Tool calls come back as one structured reply, so no streaming when tools are offered.
             stream_to = forward if on_token and not tools else None
-            return _chat_once(messages, model, stream_to, temperature, max_tokens, tools)
+            return _chat_once(messages, model, stream_to, temperature, max_tokens, tools, json_mode)
         except ollama.ResponseError as e:
             if e.status_code == 404:
                 raise LLMError(f"Model '{model}' not found. Download it with: ollama pull {model}") from e
@@ -252,13 +258,13 @@ def _unreachable_message() -> str:
 
 def _chat_once(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None,
-    temperature: float | None, max_tokens: int, tools: list[dict] | None = None,
+    temperature: float | None, max_tokens: int, tools: list[dict] | None = None, json_mode: bool = False,
 ) -> LLMResponse:
     """One attempt at the LLM call, no error handling."""
     temperature = config.TEMPERATURE if temperature is None else temperature
     if config.LLM_PROVIDER == "ollama":
-        return _chat_once_ollama(_messages_for_ollama(messages), model, on_token, temperature, max_tokens, tools)
-    return _chat_once_openai(_messages_for_openai(messages), model, on_token, temperature, max_tokens, tools)
+        return _chat_once_ollama(_messages_for_ollama(messages), model, on_token, temperature, max_tokens, tools, json_mode)
+    return _chat_once_openai(_messages_for_openai(messages), model, on_token, temperature, max_tokens, tools, json_mode)
 
 
 # Each provider writes tool-call messages slightly differently; we keep one neutral form and convert.
@@ -294,7 +300,7 @@ def _messages_for_openai(messages: list[dict]) -> list[dict]:
 
 def _chat_once_ollama(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int,
-    tools: list[dict] | None = None,
+    tools: list[dict] | None = None, json_mode: bool = False,
 ) -> LLMResponse:
     options = {
         "temperature": temperature,
@@ -303,7 +309,8 @@ def _chat_once_ollama(
     }
 
     if on_token is None:
-        response = _ollama_client.chat(model=model, messages=messages, options=options, tools=tools)
+        response = _ollama_client.chat(model=model, messages=messages, options=options, tools=tools,
+                                       format="json" if json_mode else None)
         result = _ollama_to_llm_response(response, response.message.content or "")
         result.tool_calls = [
             ToolCall(id=f"call_{i}", name=t.function.name, arguments=dict(t.function.arguments or {}))
@@ -346,7 +353,7 @@ def _ollama_to_llm_response(
 
 def _chat_once_openai(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int,
-    tools: list[dict] | None = None,
+    tools: list[dict] | None = None, json_mode: bool = False,
 ) -> LLMResponse:
     client = _get_openai_client()
     params = {
@@ -359,6 +366,8 @@ def _chat_once_openai(
         params["reasoning_effort"] = config.LLM_REASONING_EFFORT
     if tools:
         params["tools"] = tools
+    if json_mode:
+        params["response_format"] = {"type": "json_object"}
     start = time.perf_counter()
 
     if on_token is None:

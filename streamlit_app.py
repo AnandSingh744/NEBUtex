@@ -29,6 +29,9 @@ except FileNotFoundError:
 from research_agent import config, llm_client  # noqa: E402  (must come after the secrets are loaded)
 from research_agent.agent import AgentStep, run_agent  # noqa: E402
 from research_agent.chat_store import ChatStore  # noqa: E402
+from research_agent.conversation import condense_question  # noqa: E402
+from research_agent.report import research_report  # noqa: E402
+from research_agent.workflows import compare_documents, find_contradictions, summarize_document  # noqa: E402
 from research_agent.db import DatabaseError  # noqa: E402
 from research_agent.embedder import embed_query  # noqa: E402
 from research_agent.llm_client import LLMError  # noqa: E402
@@ -161,6 +164,7 @@ with st.sidebar:
         st.rerun()  # redraw so the library list includes the new documents
 
     st.divider()
+    workspace = st.radio("Workspace", ["Chat", "Summarize", "Compare", "Contradictions", "Report"], horizontal=True)
     scope = st.selectbox("Search in", [ALL_DOCUMENTS, *docs])
     k = st.slider("Passages per question", min_value=1, max_value=10, value=config.RAG_TOP_K)
     research_mode = st.toggle("🌐 Research mode", help="An agent searches your documents, then arXiv and "
@@ -170,9 +174,75 @@ with st.sidebar:
     if not llm_ok:
         st.error(f"The language model ({config.MODEL}) isn't available. {llm_problem}")
 
-# ---------- Main area: chat ----------
+# ---------- Main area ----------
 st.title("Personal Research Agent")
-st.caption("Answers come only from your documents, with page citations. Each question is answered on its own.")
+
+VERDICT_STYLE = {"contradicts": ("error", "⚠️ Contradicts"), "agrees": ("success", "✅ Agrees"),
+                 "different_setting": ("info", "↔️ Different setting")}
+
+
+def show_workflow(name: str, names: list[str]) -> None:
+    """Summarize / Compare / Contradictions: multi-step research workflows over the library."""
+    if not names:
+        st.info("Add a PDF to the library first.")
+        return
+    try:
+        if name == "Summarize":
+            doc = st.selectbox("Document", names)
+            if st.button("Summarize", type="primary"):
+                with st.spinner("Summarising each part of the paper, then combining (map-reduce)..."):
+                    st.session_state[f"summary:{doc}"] = summarize_document(doc, store)
+            if f"summary:{doc}" in st.session_state:
+                show_markdown(st.session_state[f"summary:{doc}"])
+        elif name == "Compare":
+            if len(names) < 2:
+                st.info("Add at least two documents to compare.")
+                return
+            a = st.selectbox("Paper A", names, index=0)
+            b = st.selectbox("Paper B", [n for n in names if n != a])
+            if st.button("Compare", type="primary"):
+                with st.spinner("Retrieving passages from both papers for each aspect..."):
+                    st.session_state["comparison"] = (a, b, compare_documents(a, b, store))
+            if st.session_state.get("comparison", (None, None))[:2] == (a, b):
+                for row in st.session_state["comparison"][2]:
+                    st.subheader(row["aspect"])
+                    show_markdown(row["comparison"])
+                    if row["sources"]:
+                        st.caption("  ·  ".join(f"[{label}] {cite}" for label, cite in row["sources"].items()))
+        elif name == "Report":
+            topic = st.text_input("Report topic", placeholder="e.g. How does retrieval-augmented generation work?")
+            if st.button("Write report", type="primary") and topic:
+                with st.status("Planning sub-questions...", expanded=True) as progress:
+                    def on_step(node: str, update: dict) -> None:
+                        if node == "plan":
+                            progress.write("📋 **Plan:** " + " · ".join(update["subquestions"]))
+                            progress.update(label="Researching each sub-question...")
+                        elif node == "research":
+                            progress.write("🔎 **Research:** " + ", ".join(f["status"] for f in update["findings"]))
+                            progress.update(label="Writing the report...")
+                    st.session_state["report"] = research_report(topic, store, on_step=on_step)["report"]
+                    progress.update(label="Done", state="complete", expanded=False)
+            if "report" in st.session_state:
+                show_markdown(st.session_state["report"])
+        else:
+            topic = st.text_input("Topic to check across papers", placeholder="e.g. Wikipedia corpus used and number of passages")
+            chosen = st.multiselect("Papers", names, default=names)
+            if st.button("Find agreements and contradictions", type="primary") and topic and len(chosen) >= 2:
+                with st.spinner("Comparing claims across papers..."):
+                    st.session_state["contradictions"] = find_contradictions(topic, chosen, store)
+            for pair in st.session_state.get("contradictions", []):
+                kind, label = VERDICT_STYLE[pair["verdict"]]
+                getattr(st, kind)(f"**{label}**\n\n**A:** {pair['claim_a']}  *({pair['citation_a']})*\n\n"
+                                  f"**B:** {pair['claim_b']}  *({pair['citation_b']})*\n\n{pair.get('explanation', '')}")
+    except LLMError as e:
+        st.error(str(e))
+
+
+if workspace != "Chat":
+    show_workflow(workspace, list(docs))
+    st.stop()
+
+st.caption("Answers come only from your documents, with page citations. Follow-up questions use the conversation.")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -237,12 +307,16 @@ if question := st.chat_input("Ask a question about your documents"):
         st.warning("Add a PDF to the library first.")
         st.stop()
 
+    history = list(st.session_state.messages)  # earlier turns, for follow-up questions
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         show_markdown(question)
 
     with st.chat_message("assistant"):
-        msg = answer_with_agent(question) if research_mode else answer_with_rag(question)
+        standalone = condense_question(question, history) if history else question
+        if standalone != question:
+            st.caption(f"🔎 Searched for: {standalone}")  # so a bad rewrite is easy to spot
+        msg = answer_with_agent(standalone) if research_mode else answer_with_rag(standalone)
         show_assistant_message(msg)
     st.session_state.messages.append(msg)
 

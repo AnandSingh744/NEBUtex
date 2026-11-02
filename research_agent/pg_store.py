@@ -123,6 +123,14 @@ class PostgresStore:
             rows = conn.execute(sql, {"query": query, "k": k, "source": source}).fetchall()
         return [(Chunk(chunk_id=r[0], source=r[1], page_number=r[2], text=r[3]), float(r[4])) for r in rows]
 
+    def document_chunks(self, name: str) -> list[Chunk]:
+        """All chunks of one document, in reading order."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT c.id, d.name, c.page_number, c.text FROM chunks c JOIN documents d ON d.id = c.document_id "
+                "WHERE d.name = %s ORDER BY c.chunk_index", (name,)).fetchall()
+        return [Chunk(chunk_id=r[0], source=r[1], page_number=r[2], text=r[3]) for r in rows]
+
     def load_corpus(self) -> tuple[list[Chunk], np.ndarray]:
         """Every chunk with its vector, in document then chunk order. Used by the exact-search baseline."""
         with self._pool.connection() as conn:
