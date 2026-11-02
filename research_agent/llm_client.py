@@ -6,11 +6,16 @@ Two providers, chosen by config.LLM_PROVIDER:
 Both return the same LLMResponse and raise the same LLMError, so callers never know which is in use.
 """
 
+import hashlib
+import json
 import logging
+import os
 import random
+import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import httpx
 import ollama
@@ -84,20 +89,78 @@ def check_llm() -> tuple[bool, str]:
     return True, "ok"
 
 
+# ---------- Optional response cache (used by evaluation) ----------
+# With temperature 0 the same request always gets the same reply, so it can be remembered.
+# Evaluation turns this on so re-runs only call the model for prompts that actually changed.
+
+_cache: dict | None = None
+_cache_path: Path | None = None
+_cache_lock = threading.Lock()
+
+
+def enable_cache(path: str | Path) -> None:
+    """Remember replies to temperature-0 requests in a JSON file (loaded now, written by save_cache())."""
+    global _cache, _cache_path
+    _cache_path = Path(path)
+    _cache = json.loads(_cache_path.read_text(encoding="utf-8")) if _cache_path.exists() else {}
+
+
+def save_cache() -> None:
+    if _cache is None or _cache_path is None:
+        return
+    with _cache_lock:
+        tmp = _cache_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_cache), encoding="utf-8")
+        os.replace(tmp, _cache_path)
+
+
+def _cache_key(messages: list[dict], model: str, max_tokens: int) -> str:
+    # Everything that can change the reply goes into the key.
+    request = [config.LLM_PROVIDER, config.LLM_BASE_URL, model, max_tokens, config.LLM_REASONING_EFFORT, messages]
+    return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+
+
 def chat(
     messages: list[dict],
     model: str = config.MODEL,
     on_token: Callable[[str], None] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> LLMResponse:
     """Send a list of {"role", "content"} messages and return the model's reply.
 
     The model is stateless: it sees only the messages passed in this call.
     If on_token is given, the reply is streamed and on_token is called with
     each piece of text as soon as it is generated.
+    temperature overrides config.TEMPERATURE for this call (e.g. 0 for consistent grading).
+    max_tokens overrides config.MAX_OUTPUT_TOKENS (e.g. a small cap for short JSON replies, so a
+    model stuck repeating itself is cut off early).
 
     Transient failures are retried with exponential backoff. Anything that
     still fails is raised as LLMError.
     """
+    effective_temperature = config.TEMPERATURE if temperature is None else temperature
+    max_tokens = max_tokens or config.MAX_OUTPUT_TOKENS
+    if _cache is not None and effective_temperature == 0:
+        key = _cache_key(messages, model, max_tokens)
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit is not None:
+            response = LLMResponse(**hit)
+            if on_token:
+                on_token(response.text)  # streaming callers still receive the text
+            return response
+        response = _chat_with_retries(messages, model, on_token, temperature, max_tokens)
+        with _cache_lock:
+            _cache[key] = asdict(response)
+        return response
+    return _chat_with_retries(messages, model, on_token, temperature, max_tokens)
+
+
+def _chat_with_retries(
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None,
+    temperature: float | None, max_tokens: int,
+) -> LLMResponse:
     for attempt in range(1, config.MAX_ATTEMPTS + 1):
         stream_started = False
 
@@ -107,7 +170,7 @@ def chat(
             on_token(piece)
 
         try:
-            return _chat_once(messages, model, forward if on_token else None)
+            return _chat_once(messages, model, forward if on_token else None, temperature, max_tokens)
         except ollama.ResponseError as e:
             if e.status_code == 404:
                 raise LLMError(f"Model '{model}' not found. Download it with: ollama pull {model}") from e
@@ -163,22 +226,24 @@ def _unreachable_message() -> str:
 
 
 def _chat_once(
-    messages: list[dict], model: str, on_token: Callable[[str], None] | None
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None,
+    temperature: float | None, max_tokens: int,
 ) -> LLMResponse:
     """One attempt at the LLM call, no error handling."""
+    temperature = config.TEMPERATURE if temperature is None else temperature
     if config.LLM_PROVIDER == "ollama":
-        return _chat_once_ollama(messages, model, on_token)
-    return _chat_once_openai(messages, model, on_token)
+        return _chat_once_ollama(messages, model, on_token, temperature, max_tokens)
+    return _chat_once_openai(messages, model, on_token, temperature, max_tokens)
 
 
 # ---------- Ollama ----------
 
 def _chat_once_ollama(
-    messages: list[dict], model: str, on_token: Callable[[str], None] | None
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int
 ) -> LLMResponse:
     options = {
-        "temperature": config.TEMPERATURE,
-        "num_predict": config.MAX_OUTPUT_TOKENS,
+        "temperature": temperature,
+        "num_predict": max_tokens,
         "num_ctx": config.CONTEXT_WINDOW,
     }
 
@@ -220,14 +285,14 @@ def _ollama_to_llm_response(
 # ---------- OpenAI-compatible APIs (Groq, OpenRouter, ...) ----------
 
 def _chat_once_openai(
-    messages: list[dict], model: str, on_token: Callable[[str], None] | None
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int
 ) -> LLMResponse:
     client = _get_openai_client()
     params = {
         "model": model,
         "messages": messages,
-        "temperature": config.TEMPERATURE,
-        "max_tokens": config.MAX_OUTPUT_TOKENS,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
     if config.LLM_REASONING_EFFORT:
         params["reasoning_effort"] = config.LLM_REASONING_EFFORT

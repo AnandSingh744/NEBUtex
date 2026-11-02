@@ -5,7 +5,10 @@ Usage (apply any pending migrations, then show what's there):
 """
 
 import atexit
+import logging
+import re
 import threading
+import time
 
 import psycopg
 from pgvector.psycopg import register_vector
@@ -67,6 +70,16 @@ MIGRATIONS: list[tuple[int, str, str]] = [
 
 # Any fixed number works; it just has to be the same everywhere. See init_db().
 _MIGRATION_LOCK_ID = 727274
+CONNECT_ATTEMPTS = 3  # connections can fail briefly (e.g. Neon waking up, a network blip): retry
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_error(e: Exception) -> str:
+    """The error's type and message with any connection string or host removed, for logs."""
+    msg = re.sub(r"postgres(ql)?://\S+", "<url>", str(e))
+    msg = re.sub(r"[\w.-]+\.neon\.tech", "<host>", msg)
+    return f"{type(e).__name__}: {msg.strip()[:300]}"
 
 
 class DatabaseError(Exception):
@@ -92,31 +105,40 @@ def init_db() -> list[str]:
     """Bring the database up to date by applying any migrations it doesn't have yet.
 
     Returns the names of the migrations applied now (empty if it was already up to date).
+    Brief connection failures are retried.
     """
     if not config.DATABASE_URL:
         raise DatabaseError("DATABASE_URL is not set. Add it to the .env file (or the app's secrets).")
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            return _apply_migrations()
+        except psycopg.OperationalError as e:
+            logger.warning("Database connection failed (attempt %d/%d): %s", attempt, CONNECT_ATTEMPTS, _safe_error(e))
+            if attempt == CONNECT_ATTEMPTS:
+                raise DatabaseError("Could not connect to the database. Check DATABASE_URL and the internet connection.") from e
+            time.sleep(2 ** attempt)  # 2s, then 4s
+
+
+def _apply_migrations() -> list[str]:
     applied_now = []
-    try:
-        # A plain connection: register_vector() needs the vector extension, which migration 1 creates.
-        with psycopg.connect(config.DATABASE_URL, connect_timeout=15, prepare_threshold=None) as conn:
-            with conn.transaction():  # all pending migrations succeed together, or none are applied
-                # Only one app instance migrates at a time; others wait here, then find nothing to do.
-                conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_ID,))
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS schema_migrations (
-                        version     INTEGER PRIMARY KEY,
-                        name        TEXT NOT NULL,
-                        applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-                    )
-                """)
-                done = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
-                for version, name, sql in MIGRATIONS:
-                    if version not in done:
-                        conn.execute(sql)
-                        conn.execute("INSERT INTO schema_migrations (version, name) VALUES (%s, %s)", (version, name))
-                        applied_now.append(f"{version}: {name}")
-    except psycopg.OperationalError as e:
-        raise DatabaseError("Could not connect to the database. Check DATABASE_URL and the internet connection.") from e
+    # A plain connection: register_vector() needs the vector extension, which migration 1 creates.
+    with psycopg.connect(config.DATABASE_URL, connect_timeout=15, prepare_threshold=None) as conn:
+        with conn.transaction():  # all pending migrations succeed together, or none are applied
+            # Only one app instance migrates at a time; others wait here, then find nothing to do.
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_ID,))
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version     INTEGER PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+            done = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
+            for version, name, sql in MIGRATIONS:
+                if version not in done:
+                    conn.execute(sql)
+                    conn.execute("INSERT INTO schema_migrations (version, name) VALUES (%s, %s)", (version, name))
+                    applied_now.append(f"{version}: {name}")
     return applied_now
 
 

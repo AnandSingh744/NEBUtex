@@ -18,3 +18,7 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+# Evaluation runs (contain passages from your documents)
+eval/runs/
+eval/.llm_cache.json

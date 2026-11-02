@@ -43,6 +43,10 @@ LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low" if "gpt-oss" in M
 # 0 = always pick the most likely token (deterministic); higher = more varied.
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
+# Model that GRADES answers during evaluation (eval/answer_eval.py). Defaults to the answering
+# model: free and already downloaded, but a model tends to favour answers like its own.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", MODEL)
+
 # Hard cap on generated tokens, so one reply can't run forever.
 MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1024"))
 

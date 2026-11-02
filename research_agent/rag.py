@@ -89,7 +89,8 @@ def is_not_found(text: str) -> bool:
 
 
 def answer(
-    question: str, retriever, k: int = config.RAG_TOP_K, on_token=None, source: str | None = None
+    question: str, retriever, k: int = config.RAG_TOP_K, on_token=None, source: str | None = None,
+    temperature: float | None = None,
 ) -> RAGAnswer:
     """The full RAG pipeline: retrieve -> select -> prompt -> LLM -> resolve citations.
 
@@ -97,7 +98,7 @@ def answer(
     """
     sources = select_sources(retriever.search(question, k=k, source=source))
     messages = build_rag_messages(question, sources)
-    response = chat(messages, on_token=on_token)
+    response = chat(messages, on_token=on_token, temperature=temperature)
     text = normalize_citations(response.text)
     cited, invalid = parse_citations(text, len(sources))
     return RAGAnswer(

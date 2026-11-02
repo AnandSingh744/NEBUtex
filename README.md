@@ -32,7 +32,7 @@ LLM_API_KEY=<your key>          # never commit this
 
 - `research_agent/` – the engine: PDF loading, cleaning, chunking, embeddings, vector store, retrieval, RAG
 - `streamlit_app.py` – web UI · `api/` – FastAPI · `research.py` – CLI · `chat.py` – plain chat
-- `eval/` + `check_*.py` – retrieval and behaviour checks
+- `eval/` – test set (`testset.jsonl`) and evaluation: `python -m eval.report --label <name>` runs retrieval + answer checks, saves the run, and compares it with the previous one
 
 ## License
 
