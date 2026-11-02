@@ -4,12 +4,17 @@ Run:
     streamlit run streamlit_app.py
 
 Streamlit re-runs this whole script on every interaction, so:
-- st.session_state keeps the chat history between re-runs (one per browser tab)
+- st.session_state keeps the open conversation between re-runs (one per browser tab)
 - @st.cache_resource loads heavy things (database, embedding model) only once
+
+Conversations are saved in the database (if DATABASE_URL is set). The open conversation's id
+is kept in the page address (?c=<id>), so refreshing the page reopens the same chat.
 """
 
+import logging
 import os
 
+import psycopg
 import streamlit as st
 
 # On Streamlit Cloud, settings (LLM_PROVIDER, LLM_API_KEY, ...) come from the app's Secrets box.
@@ -22,13 +27,14 @@ except FileNotFoundError:
     pass
 
 from research_agent import config, llm_client  # noqa: E402  (must come after the secrets are loaded)
+from research_agent.chat_store import ChatStore  # noqa: E402
+from research_agent.db import DatabaseError  # noqa: E402
 from research_agent.embedder import embed_query  # noqa: E402
-from research_agent.ingest import list_documents  # noqa: E402
 from research_agent.llm_client import LLMError  # noqa: E402
 from research_agent.rag import answer  # noqa: E402
-from research_agent.retriever import ChromaRetriever  # noqa: E402
+from research_agent.retriever import StoreRetriever  # noqa: E402
 from research_agent.uploads import UploadError, add_uploaded_pdf  # noqa: E402
-from research_agent.vector_store import VectorStore  # noqa: E402
+from research_agent.store import DocumentStore, get_store  # noqa: E402
 
 ALL_DOCUMENTS = "All documents"
 STATUS_NOTES = {
@@ -40,11 +46,23 @@ STATUS_NOTES = {
 st.set_page_config(page_title="Research Agent", page_icon="📚", layout="wide")
 
 
-@st.cache_resource(show_spinner="Loading the search index and embedding model...")
-def get_store() -> VectorStore:
-    store = VectorStore()
+@st.cache_resource(show_spinner="Loading your library and the embedding model...")
+def load_store() -> DocumentStore:
+    store = get_store()  # Postgres if DATABASE_URL is set, otherwise local files
     embed_query("warm-up")
     return store
+
+
+@st.cache_resource(show_spinner="Connecting to the database...")
+def get_chat_store() -> ChatStore | None:
+    """The chat history store, or None if there's no database (history then lasts only for this tab)."""
+    if not config.DATABASE_URL:
+        return None
+    try:
+        return ChatStore()
+    except DatabaseError:
+        logging.exception("Chat history disabled: database unavailable")
+        return None
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -67,16 +85,52 @@ def show_assistant_message(msg: dict) -> None:
             st.text(c["text"])
 
 
-store = get_store()
-if "messages" not in st.session_state:
-    st.session_state.messages = []  # {"role", "content", and for answers: "status", "citations"}
-if "notices" not in st.session_state:
-    st.session_state.notices = []   # upload results to show after the page refreshes
+def open_conversation(conversation_id: str | None) -> None:
+    """Switch the page to a conversation (None = a new, empty chat) and redraw."""
+    if conversation_id:
+        st.query_params["c"] = conversation_id
+    else:
+        st.query_params.pop("c", None)
+    st.rerun()
 
-# ---------- Sidebar: library, upload, settings ----------
+
+store = load_store()
+chats = get_chat_store()
+if "messages" not in st.session_state:
+    st.session_state.messages = []      # {"role", "content", and for answers: "status", "citations"}
+    st.session_state.loaded_id = None   # which saved conversation `messages` came from
+if "notices" not in st.session_state:
+    st.session_state.notices = []       # upload results to show after the page refreshes
+
+# Load the conversation named in the page address, if it isn't the one already on screen.
+current_id = st.query_params.get("c")
+if chats and current_id != st.session_state.loaded_id:
+    st.session_state.messages = chats.get_messages(current_id) if current_id else []
+    st.session_state.loaded_id = current_id
+    if current_id and not st.session_state.messages:
+        open_conversation(None)  # unknown or deleted id: start fresh instead of showing an empty "saved" chat
+
+# ---------- Sidebar: conversations, library, upload, settings ----------
 with st.sidebar:
+    st.header("💬 Conversations")
+    if st.button("➕ New chat", use_container_width=True):
+        st.session_state.messages = []
+        open_conversation(None)
+    if chats:
+        for conv in chats.list_conversations():
+            is_open = conv["id"] == current_id
+            if st.button(conv["title"], key=f"conv-{conv['id']}", use_container_width=True,
+                         type="primary" if is_open else "secondary"):
+                open_conversation(conv["id"])
+        if current_id and st.button("🗑 Delete this chat", use_container_width=True):
+            chats.delete_conversation(current_id)
+            open_conversation(None)
+    else:
+        st.caption("History isn't saved: no database is configured.")
+
+    st.divider()
     st.header("📚 Library")
-    docs = list_documents()
+    docs = store.list_documents()
     if docs:
         for name, info in docs.items():
             st.markdown(f"**{name}**  \n{info['num_pages']} pages · {info['num_chunks']} passages")
@@ -98,16 +152,13 @@ with st.sidebar:
                 except UploadError as e:
                     st.session_state.notices.append(("error", f"{f.name}: {e}"))
                 else:
-                    verb = "already in the library" if result.status == "unchanged" else f"added ({len(result.chunks)} passages)"
+                    verb = "already in the library" if result.status == "unchanged" else f"added ({result.num_chunks} passages)"
                     st.session_state.notices.append(("success", f"{result.source}: {verb}"))
         st.rerun()  # redraw so the library list includes the new documents
 
     st.divider()
     scope = st.selectbox("Search in", [ALL_DOCUMENTS, *docs])
     k = st.slider("Passages per question", min_value=1, max_value=10, value=config.RAG_TOP_K)
-    if st.button("Clear chat"):
-        st.session_state.messages = []
-        st.rerun()
 
     llm_ok, llm_problem = llm_status()
     if not llm_ok:
@@ -144,7 +195,7 @@ if question := st.chat_input("Ask a question about your documents"):
         try:
             with st.spinner("Searching your documents..."):
                 result = answer(
-                    question, ChromaRetriever(store), k=k,
+                    question, StoreRetriever(store), k=k,
                     source=None if scope == ALL_DOCUMENTS else scope, on_token=on_token,
                 )
         except LLMError as e:
@@ -164,3 +215,18 @@ if question := st.chat_input("Ask a question about your documents"):
         }
         show_assistant_message(msg)
     st.session_state.messages.append(msg)
+
+    # Save the question and answer. A failure here shouldn't lose the answer already on screen.
+    if chats:
+        try:
+            new_conversation = current_id is None
+            conversation_id = current_id or chats.create_conversation(question)
+            chats.add_message(conversation_id, "user", question)
+            chats.add_message(conversation_id, "assistant", msg["content"], msg["status"], msg["citations"])
+        except (DatabaseError, psycopg.Error):
+            logging.exception("Could not save the conversation")
+            st.warning("This answer couldn't be saved to your chat history.")
+        else:
+            if new_conversation:
+                st.session_state.loaded_id = conversation_id  # already on screen; no need to reload it
+                open_conversation(conversation_id)            # put its id in the address + list it in the sidebar

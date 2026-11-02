@@ -14,7 +14,7 @@ from typing import BinaryIO
 from research_agent import config
 from research_agent.ingest import IngestResult, ingest_pdf
 from research_agent.pdf_loader import PDFLoadError, load_pdf
-from research_agent.vector_store import VectorStore
+from research_agent.store import DocumentStore
 
 PDF_MAGIC = b"%PDF-"  # every real PDF file starts with these bytes
 UPLOAD_TMP_DIR = config.DATA_DIR / "uploads_tmp"  # same disk as PAPERS_DIR, so moving a file is instant and atomic
@@ -42,7 +42,7 @@ def safe_filename(filename: str | None) -> str:
     return f"{stem}.pdf"
 
 
-def add_uploaded_pdf(filename: str | None, data: BinaryIO, store: VectorStore) -> IngestResult:
+def add_uploaded_pdf(filename: str | None, data: BinaryIO, store: DocumentStore) -> IngestResult:
     """Validate an uploaded PDF, save it to PAPERS_DIR, and ingest it.
 
     A file with the same name as an existing document replaces it (only once it's known to be valid).

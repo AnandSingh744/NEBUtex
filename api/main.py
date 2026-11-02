@@ -16,12 +16,11 @@ from pydantic import BaseModel, Field
 
 from research_agent import config, llm_client
 from research_agent.embedder import embed_query
-from research_agent.ingest import list_documents
 from research_agent.llm_client import LLMError
 from research_agent.rag import RAGAnswer, answer
-from research_agent.retriever import ChromaRetriever
+from research_agent.retriever import StoreRetriever
 from research_agent.uploads import UploadError, add_uploaded_pdf
-from research_agent.vector_store import VectorStore
+from research_agent.store import get_store
 
 # How each kind of rejected upload is reported over HTTP.
 UPLOAD_ERROR_STATUS = {"invalid_name": 400, "empty": 400, "not_pdf": 415, "too_large": 413, "unreadable": 422}
@@ -29,9 +28,9 @@ UPLOAD_ERROR_STATUS = {"invalid_name": 400, "empty": 400, "not_pdf": 415, "too_l
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Runs once at server start-up: open the vector store and load the embedding model,
+    # Runs once at server start-up: open the document store and load the embedding model,
     # so individual requests don't pay that cost.
-    app.state.store = VectorStore()
+    app.state.store = get_store()
     embed_query("warm-up")
     yield
     # (Code after `yield` would run at shutdown; nothing to clean up yet.)
@@ -58,7 +57,7 @@ class HealthResponse(BaseModel):
 
 class UploadResult(BaseModel):
     name: str     # the (sanitized) file name the document is stored under
-    status: str   # "ingested" | "unchanged" | "reindexed"
+    status: str   # "ingested" | "unchanged"
     chunks: int
 
 
@@ -79,7 +78,7 @@ def health() -> HealthResponse:
         llm_available=llm_ok,
         llm_model=config.MODEL,
         embedding_model=config.EMBEDDING_MODEL,
-        documents=len(list_documents()),
+        documents=len(app.state.store.list_documents()),
         passages=passages,
     )
 
@@ -89,7 +88,7 @@ def documents() -> list[DocumentInfo]:
     """All ingested documents."""
     return [
         DocumentInfo(name=name, pages=info["num_pages"], chunks=info["num_chunks"], processed_at=info["processed_at"])
-        for name, info in list_documents().items()
+        for name, info in app.state.store.list_documents().items()
     ]
 
 
@@ -105,7 +104,7 @@ def upload_document(response: Response, file: UploadFile = File(...)) -> UploadR
         raise HTTPException(status_code=UPLOAD_ERROR_STATUS[e.reason], detail=str(e)) from e
     if result.status == "unchanged":
         response.status_code = 200  # nothing new was created
-    return UploadResult(name=result.source, status=result.status, chunks=len(result.chunks))
+    return UploadResult(name=result.source, status=result.status, chunks=result.num_chunks)
 
 
 class AskRequest(BaseModel):
@@ -136,7 +135,7 @@ def _check_ask_request(req: AskRequest) -> None:
     """Problems we can report with a proper status code before any work starts."""
     if app.state.store.count() == 0:
         raise HTTPException(status_code=400, detail="No documents yet. Upload a PDF first (POST /documents).")
-    if req.source is not None and req.source not in list_documents():
+    if req.source is not None and req.source not in app.state.store.list_documents():
         raise HTTPException(status_code=404, detail=f"No document named {req.source!r}.")
 
 
@@ -161,7 +160,7 @@ def ask(req: AskRequest) -> AskResponse:
     """Answer a question from the documents, with citations. Returns when the full answer is ready."""
     _check_ask_request(req)
     try:
-        result = answer(req.question, ChromaRetriever(app.state.store), k=req.k, source=req.source)
+        result = answer(req.question, StoreRetriever(app.state.store), k=req.k, source=req.source)
     except LLMError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return _to_ask_response(result)
@@ -184,7 +183,7 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
     def worker() -> None:
         try:
             result = answer(
-                req.question, ChromaRetriever(app.state.store), k=req.k, source=req.source,
+                req.question, StoreRetriever(app.state.store), k=req.k, source=req.source,
                 on_token=lambda piece: events.put(("token", {"text": piece})),
             )
             events.put(("done", _to_ask_response(result).model_dump()))

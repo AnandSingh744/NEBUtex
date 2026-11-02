@@ -1,8 +1,8 @@
 """Semantic search over ingested chunks.
 
 Two interchangeable retrievers with the same search() interface:
-- ChromaRetriever: approximate search (HNSW index) in the Chroma vector database. Default.
-- NumpyRetriever: exact brute-force cosine similarity. Kept as a baseline/fallback.
+- StoreRetriever: asks the document store (pgvector in Postgres, or Chroma locally). Default; approximate (HNSW).
+- NumpyRetriever: exact brute-force cosine similarity over every chunk. A baseline for checking the store.
 
 Usage:
     python -m research_agent.retriever "What is multi-head attention?"
@@ -19,8 +19,7 @@ import numpy as np
 
 from research_agent.chunker import Chunk
 from research_agent.embedder import embed_query
-from research_agent.ingest import load_corpus
-from research_agent.vector_store import VectorStore
+from research_agent.store import DocumentStore, get_store
 
 DEFAULT_K = 5
 
@@ -35,8 +34,19 @@ class SearchResult:
         return f"{self.chunk.source}, p. {self.chunk.page_number}"
 
 
+class StoreRetriever:
+    """Search through the document store's own index (pgvector or Chroma)."""
+
+    def __init__(self, store: DocumentStore):
+        self.store = store
+
+    def search(self, query: str, k: int = DEFAULT_K, source: str | None = None) -> list[SearchResult]:
+        hits = self.store.search(embed_query(query), k, source=source)
+        return [SearchResult(chunk=chunk, score=score) for chunk, score in hits]
+
+
 class NumpyRetriever:
-    """Exact search: compares the query with every chunk. Holds the index in memory."""
+    """Exact search: compares the query with every chunk. Holds all vectors in memory."""
 
     def __init__(self, chunks: list[Chunk], vectors: np.ndarray):
         if len(chunks) != len(vectors):
@@ -45,8 +55,8 @@ class NumpyRetriever:
         self.vectors = vectors  # shape (n_chunks, dim), each row normalized to length 1
 
     @classmethod
-    def from_disk(cls) -> "NumpyRetriever":
-        chunks, vectors = load_corpus()
+    def from_store(cls, store: DocumentStore) -> "NumpyRetriever":
+        chunks, vectors = store.load_corpus()
         if not chunks:
             raise RuntimeError("No documents ingested yet. Run: python -m research_agent.ingest data/papers")
         return cls(chunks, vectors)
@@ -68,19 +78,6 @@ class NumpyRetriever:
         return [SearchResult(chunk=self.chunks[i], score=float(scores[i])) for i in top]
 
 
-class ChromaRetriever:
-    """Approximate search via the Chroma vector database (HNSW index)."""
-
-    def __init__(self, store: VectorStore | None = None):
-        self.store = store or VectorStore()
-        if self.store.count() == 0:
-            raise RuntimeError("Vector store is empty. Run: python -m research_agent.ingest data/papers")
-
-    def search(self, query: str, k: int = DEFAULT_K, source: str | None = None) -> list[SearchResult]:
-        hits = self.store.search(embed_query(query), k, source=source)
-        return [SearchResult(chunk=chunk, score=score) for chunk, score in hits]
-
-
 def _print_results(results: list[SearchResult]) -> None:
     for rank, r in enumerate(results, start=1):
         preview = " ".join(r.chunk.text.split())[:160]
@@ -93,25 +90,26 @@ if __name__ == "__main__":
     parser.add_argument("query")
     parser.add_argument("-k", type=int, default=DEFAULT_K, help="number of results")
     parser.add_argument("--source", help="only search this document (file name)")
-    parser.add_argument("--backend", choices=["chroma", "numpy"], default="chroma")
-    parser.add_argument("--compare", action="store_true", help="compare Chroma (approximate) with NumPy (exact)")
+    parser.add_argument("--backend", choices=["store", "numpy"], default="store")
+    parser.add_argument("--compare", action="store_true", help="compare the store's search with exact NumPy search")
     args = parser.parse_args()
 
+    store = get_store()
     embed_query("warm-up")  # load the embedding model first, so it isn't counted in search time
-    print(f'Query: "{args.query}"' + (f"  (only {args.source})" if args.source else "") + "\n")
+    print(f'Query: "{args.query}"' + (f"  (only {args.source})" if args.source else "") + f"  [store: {type(store).__name__}]\n")
 
     if args.compare:
-        exact = NumpyRetriever.from_disk().search(args.query, args.k, args.source)
-        approx = ChromaRetriever().search(args.query, args.k, args.source)
+        exact = NumpyRetriever.from_store(store).search(args.query, args.k, args.source)
+        approx = StoreRetriever(store).search(args.query, args.k, args.source)
         exact_ids = [r.chunk.chunk_id for r in exact]
         approx_ids = [r.chunk.chunk_id for r in approx]
         for rank, (e, a) in enumerate(zip(exact, approx), start=1):
             mark = "=" if e.chunk.chunk_id == a.chunk.chunk_id else "≠"
-            print(f"{rank}. numpy {e.chunk.chunk_id} [{e.score:.4f}]  {mark}  chroma {a.chunk.chunk_id} [{a.score:.4f}]")
+            print(f"{rank}. numpy {e.chunk.chunk_id} [{e.score:.4f}]  {mark}  store {a.chunk.chunk_id} [{a.score:.4f}]")
         overlap = len(set(exact_ids) & set(approx_ids))
-        print(f"\nChroma found {overlap}/{len(exact_ids)} of the exact top-{args.k} (recall@{args.k} = {overlap / len(exact_ids):.2f})")
+        print(f"\nThe store found {overlap}/{len(exact_ids)} of the exact top-{args.k} (recall@{args.k} = {overlap / len(exact_ids):.2f})")
     else:
-        retriever = ChromaRetriever() if args.backend == "chroma" else NumpyRetriever.from_disk()
+        retriever = StoreRetriever(store) if args.backend == "store" else NumpyRetriever.from_store(store)
         t0 = time.perf_counter()
         results = retriever.search(args.query, args.k, args.source)
         elapsed_ms = (time.perf_counter() - t0) * 1000

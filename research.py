@@ -16,12 +16,12 @@ follow-ups like "what about the big model?" would retrieve the wrong passages.
 
 from research_agent import config
 from research_agent.embedder import embed_query
-from research_agent.ingest import _find_pdfs, ingest_pdf, list_documents
+from research_agent.ingest import _find_pdfs, ingest_pdf
 from research_agent.llm_client import LLMError
 from research_agent.pdf_loader import PDFLoadError
 from research_agent.rag import RAGAnswer, answer
-from research_agent.retriever import ChromaRetriever
-from research_agent.vector_store import VectorStore
+from research_agent.retriever import StoreRetriever
+from research_agent.store import DocumentStore, get_store
 
 HELP = """Commands:
   /add <pdf or folder>  add documents
@@ -39,8 +39,8 @@ STATUS_NOTES = {
 }
 
 
-def show_docs() -> None:
-    docs = list_documents()
+def show_docs(store: DocumentStore) -> None:
+    docs = store.list_documents()
     if not docs:
         print("No documents yet. Use /add <pdf or folder>.\n")
         return
@@ -49,7 +49,7 @@ def show_docs() -> None:
     print()
 
 
-def add_documents(target: str, store: VectorStore) -> None:
+def add_documents(target: str, store: DocumentStore) -> None:
     pdfs = _find_pdfs([target])
     if not pdfs:
         print(f"No PDFs found at {target}\n")
@@ -71,14 +71,14 @@ def show_sources(last: RAGAnswer | None) -> None:
         print(source.chunk.text + "\n")
 
 
-def ask(question: str, store: VectorStore, k: int) -> RAGAnswer | None:
+def ask(question: str, store: DocumentStore, k: int) -> RAGAnswer | None:
     if store.count() == 0:
         print("No documents yet. Use /add <pdf or folder> first.\n")
         return None
 
     print("\nAssistant: ", end="", flush=True)
     try:
-        result = answer(question, ChromaRetriever(store), k=k, on_token=lambda piece: print(piece, end="", flush=True))
+        result = answer(question, StoreRetriever(store), k=k, on_token=lambda piece: print(piece, end="", flush=True))
     except LLMError as e:
         print(f"\n\n[error] {e}\n")
         return None
@@ -99,7 +99,7 @@ def ask(question: str, store: VectorStore, k: int) -> RAGAnswer | None:
 
 
 def main() -> None:
-    store = VectorStore()
+    store = get_store()
     print("Loading...", end="", flush=True)
     embed_query("warm-up")  # load the embedding model once, up front
     k = config.RAG_TOP_K
@@ -120,7 +120,7 @@ def main() -> None:
         elif command == "/help":
             print(HELP + "\n")
         elif command == "/docs":
-            show_docs()
+            show_docs(store)
         elif command == "/add":
             if arg:
                 add_documents(arg.strip(), store)

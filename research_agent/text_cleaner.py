@@ -13,6 +13,9 @@ import sys
 from research_agent.pdf_loader import Document, Page, load_pdf
 
 LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl"}
+# Invisible control characters (except tab and newline). PDF maths symbols sometimes come out as
+# these, e.g. \x00 and \x01; they're garbage in text, and PostgreSQL rejects \x00 outright.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 WORD = re.compile(r"\w+")
 HYPHEN_BREAK = re.compile(r"(\w+)-\n(\w+)")
 # A single newline followed by a lowercase letter is a line wrap in the middle of a sentence.
@@ -30,6 +33,7 @@ def clean_document(doc: Document) -> Document:
 
 
 def clean_page_text(text: str, page_number: int, vocabulary: set[str]) -> str:
+    text = CONTROL_CHARS.sub("", text)
     for ligature, letters in LIGATURES.items():
         text = text.replace(ligature, letters)
     text = _remove_page_number(text, page_number)

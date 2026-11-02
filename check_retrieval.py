@@ -7,14 +7,15 @@ document and page, then report:
 
 Usage:
     python check_retrieval.py
-    python check_retrieval.py --backend numpy
+    python check_retrieval.py --backend numpy   # exact search, to compare with the store's index
 """
 
 import argparse
 import json
 from research_agent import config
 from research_agent.embedder import embed_query
-from research_agent.retriever import ChromaRetriever, NumpyRetriever
+from research_agent.retriever import NumpyRetriever, StoreRetriever
+from research_agent.store import get_store
 
 QUESTIONS_PATH = config.EVAL_DIR / "retrieval_questions.jsonl"
 K_VALUES = [1, 3, 5, 10]
@@ -36,10 +37,11 @@ def first_hit_rank(results, source: str, pages: list[int]) -> int | None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate retrieval on known-answer questions.")
-    parser.add_argument("--backend", choices=["chroma", "numpy"], default="chroma")
+    parser.add_argument("--backend", choices=["store", "numpy"], default="store")
     args = parser.parse_args()
 
-    retriever = ChromaRetriever() if args.backend == "chroma" else NumpyRetriever.from_disk()
+    store = get_store()
+    retriever = StoreRetriever(store) if args.backend == "store" else NumpyRetriever.from_store(store)
     embed_query("warm-up")
     questions = load_questions()
 
@@ -54,7 +56,7 @@ if __name__ == "__main__":
             failures.append((q, rank, results[:3]))
 
     n = len(questions)
-    print(f"\n{n} questions, backend={args.backend}")
+    print(f"\n{n} questions, backend={args.backend}, store={type(store).__name__}")
     for k in K_VALUES:
         hits = sum(1 for r in ranks if r is not None and r <= k)
         print(f"  hit@{k:<2} = {hits / n:.2f}  ({hits}/{n})")

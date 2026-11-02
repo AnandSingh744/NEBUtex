@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from research_agent import config
 from research_agent.llm_client import LLMError, LLMResponse, chat
 from research_agent.prompts import NOT_FOUND_MESSAGE, RAG_SYSTEM_PROMPT
-from research_agent.retriever import ChromaRetriever, SearchResult
+from research_agent.retriever import SearchResult, StoreRetriever
+from research_agent.store import get_store
 
 # Our sources are labelled [S1], [S2], ... so they can't be confused with a paper's own
 # reference numbers like [12]. Matches [S1], [S2, S3] or [S2,S3]; [S1][S4] is two matches.
@@ -116,7 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("--show-prompt", action="store_true", help="print the full prompt first")
     args = parser.parse_args()
 
-    retriever = ChromaRetriever()
+    retriever = StoreRetriever(get_store())
     if args.show_prompt:
         for m in build_rag_messages(args.question, select_sources(retriever.search(args.question, k=args.k))):
             print(f"===== {m['role'].upper()} =====\n{m['content']}\n")

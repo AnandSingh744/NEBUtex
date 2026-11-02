@@ -3,9 +3,18 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # The project folder (one level above this package). All paths below are anchored to it,
 # so they work no matter which folder a command is run from.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Load secrets (like DATABASE_URL) from a local .env file if there is one. Real environment
+# variables win over .env, and .env is git-ignored so secrets never reach GitHub.
+load_dotenv(PROJECT_ROOT / ".env")
+
+# PostgreSQL connection string (contains a password: keep it in .env or app secrets, never in code).
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 DATA_DIR = Path(os.getenv("DATA_DIR", PROJECT_ROOT / "data"))
 PROCESSED_DIR = DATA_DIR / "processed"  # chunks (.jsonl), vectors (.npy), manifest.json
 PAPERS_DIR = DATA_DIR / "papers"        # original PDFs (uploads are saved here too)
@@ -51,6 +60,7 @@ REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
 # Embedding model (runs locally via fastembed/ONNX; ~67 MB, downloaded once).
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))  # numbers per vector for this model
 # BGE models were trained with this prefix on search queries (not on passages).
 EMBEDDING_QUERY_PREFIX = os.getenv(
     "EMBEDDING_QUERY_PREFIX", "Represent this sentence for searching relevant passages: "

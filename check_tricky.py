@@ -7,12 +7,13 @@ Usage:
 import json
 from research_agent import config
 from research_agent.rag import answer
-from research_agent.retriever import ChromaRetriever
+from research_agent.retriever import StoreRetriever
+from research_agent.store import get_store
 
 QUESTIONS_PATH = config.EVAL_DIR / "tricky_questions.jsonl"
 
 if __name__ == "__main__":
-    retriever = ChromaRetriever()
+    retriever = StoreRetriever(get_store())
     questions = [json.loads(line) for line in QUESTIONS_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     passed = 0
