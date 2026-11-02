@@ -78,6 +78,14 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", str(DATA_DIR / "chroma"))
 # RAG: how many chunks to retrieve, and the max total size of sources put in the prompt.
 # 12,000 chars is ~3,000 tokens, leaving plenty of room in the context window for the answer.
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+# How passages are found: "vector" (meaning only) or "hybrid" (meaning + keywords, merged by rank).
+RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "hybrid")
+# How many candidates each search contributes before merging/reranking.
+RETRIEVAL_CANDIDATES = int(os.getenv("RETRIEVAL_CANDIDATES", "20"))
+# Re-order the candidates with a cross-encoder before keeping the top k. Empty = no reranking.
+# Rewrite/split the question into search queries with one LLM call before searching ("1" = on).
+QUERY_PLANNING = os.getenv("QUERY_PLANNING", "0") == "1"
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")  # 0.12 GB; BAAI/bge-reranker-base is better but 1 GB
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "12000"))
 
 # Largest PDF the API accepts.

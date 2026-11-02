@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from research_agent import config
 from research_agent.chunker import Chunk
 from research_agent.embedder import embed_query
 from research_agent.store import DocumentStore, get_store
@@ -34,15 +35,64 @@ class SearchResult:
         return f"{self.chunk.source}, p. {self.chunk.page_number}"
 
 
-class StoreRetriever:
-    """Search through the document store's own index (pgvector or Chroma)."""
+RRF_K = 60  # the standard constant in Reciprocal Rank Fusion; dampens the gap between rank 1 and rank 2
 
-    def __init__(self, store: DocumentStore):
+
+def reciprocal_rank_fusion(*ranked_lists: list[tuple[Chunk, float]]) -> list[tuple[Chunk, float]]:
+    """Merge ranked lists by RANK, not score (their scores aren't comparable).
+
+    Each chunk scores sum(1 / (RRF_K + rank)) over the lists it appears in, so chunks ranked
+    well by several searches rise to the top.
+    """
+    fused: dict[str, float] = {}
+    chunks: dict[str, Chunk] = {}
+    for ranked in ranked_lists:
+        for rank, (chunk, _score) in enumerate(ranked, start=1):
+            fused[chunk.chunk_id] = fused.get(chunk.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+            chunks[chunk.chunk_id] = chunk
+    return sorted(((chunks[cid], score) for cid, score in fused.items()), key=lambda pair: pair[1], reverse=True)
+
+
+class StoreRetriever:
+    """Search through the document store: vector search, or hybrid (vector + keyword, fused by rank)."""
+
+    def __init__(self, store: DocumentStore, mode: str | None = None):
         self.store = store
+        self.mode = mode or config.RETRIEVAL_MODE
 
     def search(self, query: str, k: int = DEFAULT_K, source: str | None = None) -> list[SearchResult]:
-        hits = self.store.search(embed_query(query), k, source=source)
-        return [SearchResult(chunk=chunk, score=score) for chunk, score in hits]
+        if not config.QUERY_PLANNING:
+            return self._search_one(query, k, source, rerank_query=query)
+        from research_agent.query_planner import plan_queries
+        documents = [source] if source else list(self.store.list_documents())
+        queries = plan_queries(query, documents)
+        # The ORIGINAL question's search stays the main result (rewrites can lose specific terms).
+        main = self._search_one(query, k, source, rerank_query=query)
+        if len(queries) == 1:
+            return main
+        # Several parts: each part's single best passage is guaranteed a place (replacing the weakest
+        # main results), so one document can't crowd out another in a multi-document question.
+        extras = []
+        for q in queries:
+            best = self._search_one(q, 1, source, rerank_query=q)
+            if best and all(best[0].chunk.chunk_id != r.chunk.chunk_id for r in main + extras):
+                extras.append(best[0])
+        return main[: max(k - len(extras), 1)] + extras[: k - 1]
+
+    def _search_one(self, query: str, k: int, source: str | None, rerank_query: str) -> list[SearchResult]:
+        # Stage 1: gather candidates (more than k when a reranker will choose among them).
+        n = max(k, config.RETRIEVAL_CANDIDATES) if (self.mode == "hybrid" or config.RERANK_MODEL) else k
+        if self.mode == "hybrid":
+            vector_hits = self.store.search(embed_query(query), n, source=source)
+            keyword_hits = self.store.keyword_search(query, n, source=source)
+            hits = reciprocal_rank_fusion(vector_hits, keyword_hits)[:n]
+        else:
+            hits = self.store.search(embed_query(query), n, source=source)
+        # Stage 2: let the cross-encoder pick the best k.
+        if config.RERANK_MODEL:
+            from research_agent.reranker import rerank  # only loaded when reranking is on
+            hits = rerank(rerank_query, hits, k)
+        return [SearchResult(chunk=chunk, score=score) for chunk, score in hits[:k]]
 
 
 class NumpyRetriever:

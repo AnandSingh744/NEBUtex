@@ -107,6 +107,22 @@ class PostgresStore:
         # "relaxed_order" may return results slightly out of order; put the best first.
         return sorted(results, key=lambda pair: pair[1], reverse=True)
 
+    def keyword_search(self, query: str, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
+        """Full-text search: chunks sharing the query's words, best first. Strong on exact terms and numbers."""
+        sql = """
+            SELECT c.id, d.name, c.page_number, c.text, ts_rank_cd(c.tsv, q) AS score
+            FROM chunks c JOIN documents d ON d.id = c.document_id,
+                 -- plainto_tsquery ANDs every word ("a & b & c"); a long question would then match almost
+                 -- nothing, so switch to OR ("a | b | c") and let the ranking reward chunks with more words.
+                 to_tsquery('english', replace(plainto_tsquery('english', %(query)s)::text, '&', '|')) AS q
+            WHERE c.tsv @@ q {source_filter}
+            ORDER BY score DESC
+            LIMIT %(k)s
+        """.format(source_filter="AND d.name = %(source)s" if source else "")
+        with self._pool.connection() as conn:
+            rows = conn.execute(sql, {"query": query, "k": k, "source": source}).fetchall()
+        return [(Chunk(chunk_id=r[0], source=r[1], page_number=r[2], text=r[3]), float(r[4])) for r in rows]
+
     def load_corpus(self) -> tuple[list[Chunk], np.ndarray]:
         """Every chunk with its vector, in document then chunk order. Used by the exact-search baseline."""
         with self._pool.connection() as conn:

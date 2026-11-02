@@ -72,6 +72,9 @@ class LocalStore:
     def search(self, query_vector: np.ndarray, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
         return self._index.search(query_vector, k, source=source)
 
+    def keyword_search(self, query: str, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
+        return []  # no keyword index for local files: hybrid search falls back to vector search only
+
     def load_corpus(self) -> tuple[list[Chunk], np.ndarray]:
         chunks, vector_blocks = [], []
         for entry in _load_manifest().values():

@@ -62,6 +62,8 @@ def run_metadata(label: str, store) -> dict:
             "llm_provider": config.LLM_PROVIDER, "model": config.MODEL, "judge_model": config.JUDGE_MODEL,
             "answer_temperature": ANSWER_TEMPERATURE, "embedding_model": config.EMBEDDING_MODEL,
             "chunk_size": CHUNK_SIZE, "chunk_overlap": CHUNK_OVERLAP, "top_k": config.RAG_TOP_K,
+            "retrieval_mode": config.RETRIEVAL_MODE, "candidates": config.RETRIEVAL_CANDIDATES,
+            "rerank_model": config.RERANK_MODEL or "none", "query_planning": config.QUERY_PLANNING,
             "max_context_chars": config.RAG_MAX_CONTEXT_CHARS, "store": type(store).__name__,
         },
     }

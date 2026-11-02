@@ -38,6 +38,9 @@ class DocumentStore(Protocol):
     def search(self, query_vector: np.ndarray, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
         """The k chunks most similar to the query vector, best first, as (chunk, cosine similarity)."""
 
+    def keyword_search(self, query: str, k: int, source: str | None = None) -> list[tuple[Chunk, float]]:
+        """Chunks matching the query's words (full-text search), best first. May be empty if unsupported."""
+
     def load_corpus(self) -> tuple[list[Chunk], np.ndarray]:
         """Every chunk and its vector (row i belongs to chunk i). For exact-search baselines and evaluation."""
 

@@ -66,6 +66,12 @@ MIGRATIONS: list[tuple[int, str, str]] = [
 
         CREATE INDEX messages_conversation_idx ON messages (conversation_id, id);
     """),
+    (3, "keyword search on chunks", """
+        -- Word stems of each chunk ("training", "trained" -> "train"), kept up to date by Postgres itself.
+        ALTER TABLE chunks ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED;
+        -- GIN index: word -> chunks containing it (like the index at the back of a book).
+        CREATE INDEX chunks_tsv_idx ON chunks USING gin (tsv);
+    """),
 ]
 
 # Any fixed number works; it just has to be the same everywhere. See init_db().
