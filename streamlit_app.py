@@ -27,6 +27,7 @@ except FileNotFoundError:
     pass
 
 from research_agent import config, llm_client  # noqa: E402  (must come after the secrets are loaded)
+from research_agent.agent import AgentStep, run_agent  # noqa: E402
 from research_agent.chat_store import ChatStore  # noqa: E402
 from research_agent.db import DatabaseError  # noqa: E402
 from research_agent.embedder import embed_query  # noqa: E402
@@ -81,7 +82,10 @@ def show_assistant_message(msg: dict) -> None:
         kind, note = STATUS_NOTES[msg["status"]]
         getattr(st, kind)(note)
     for c in msg["citations"]:
-        with st.expander(f"[{c['label']}] {c['source']}, p. {c['page']}"):
+        where = f"{c['source']}, p. {c['page']}" if c.get("page") else c["source"]  # web results have no page
+        with st.expander(f"[{c['label']}] {where}"):
+            if c.get("url"):
+                st.markdown(f"[Open source]({c['url']})")
             st.text(c["text"])
 
 
@@ -159,6 +163,8 @@ with st.sidebar:
     st.divider()
     scope = st.selectbox("Search in", [ALL_DOCUMENTS, *docs])
     k = st.slider("Passages per question", min_value=1, max_value=10, value=config.RAG_TOP_K)
+    research_mode = st.toggle("🌐 Research mode", help="An agent searches your documents, then arXiv and "
+                              "Wikipedia if needed. Slower; works best with a strong model.")
 
     llm_ok, llm_problem = llm_status()
     if not llm_ok:
@@ -175,6 +181,57 @@ for msg in st.session_state.messages:
         else:
             show_assistant_message(msg)
 
+def answer_with_rag(question: str) -> dict:
+    """Normal mode: retrieve passages and stream a cited answer."""
+    placeholder = st.empty()
+    parts: list[str] = []
+
+    def on_token(piece: str) -> None:
+        parts.append(piece)
+        show_markdown("".join(parts) + "▌", target=placeholder)  # the text so far, with a cursor
+
+    try:
+        with st.spinner("Searching your documents..."):
+            result = answer(question, StoreRetriever(store), k=k,
+                            source=None if scope == ALL_DOCUMENTS else scope, on_token=on_token)
+    except LLMError as e:
+        placeholder.error(str(e))
+        st.session_state.messages.pop()  # forget the unanswered question
+        st.stop()
+    placeholder.empty()
+    return {
+        "role": "assistant", "content": result.text, "status": result.status,
+        "citations": [{"label": f"S{n}", "source": s.chunk.source, "page": s.chunk.page_number, "text": s.chunk.text}
+                      for n, s in result.cited_sources()],
+    }
+
+
+def answer_with_agent(question: str) -> dict:
+    """Research mode: the agent searches documents, then arXiv/Wikipedia if needed, showing each step."""
+    with st.status("Researching...", expanded=True) as progress:
+        def on_step(step: AgentStep) -> None:
+            found = f"error: {step.error}" if step.error else f"{len(step.labels)} results"
+            progress.write(f"🔧 **{step.tool}** `{step.arguments.get('query', '')}` → {found}")
+
+        try:
+            res = run_agent(question, store, on_step=on_step)
+        except LLMError as e:
+            progress.update(label="Failed", state="error")
+            st.error(str(e))
+            st.session_state.messages.pop()
+            st.stop()
+        progress.update(label=f"Done: {len(res.steps)} searches", state="complete", expanded=False)
+    if res.invalid_citations:
+        st.warning(f"The answer cites sources that don't exist: {', '.join(res.invalid_citations)}")
+    citations = []
+    for label in res.cited:
+        src = res.sources[label]
+        is_doc = src["kind"] == "document"
+        citations.append({"label": label, "source": src["source"] if is_doc else src["title"],
+                          "page": src["page"] if is_doc else None, "url": src["url"], "text": src["text"]})
+    return {"role": "assistant", "content": res.text, "status": res.status, "citations": citations}
+
+
 if question := st.chat_input("Ask a question about your documents"):
     if store.count() == 0:
         st.warning("Add a PDF to the library first.")
@@ -185,34 +242,7 @@ if question := st.chat_input("Ask a question about your documents"):
         show_markdown(question)
 
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        parts: list[str] = []
-
-        def on_token(piece: str) -> None:
-            parts.append(piece)
-            show_markdown("".join(parts) + "▌", target=placeholder)  # the text so far, with a cursor
-
-        try:
-            with st.spinner("Searching your documents..."):
-                result = answer(
-                    question, StoreRetriever(store), k=k,
-                    source=None if scope == ALL_DOCUMENTS else scope, on_token=on_token,
-                )
-        except LLMError as e:
-            placeholder.error(str(e))
-            st.session_state.messages.pop()  # forget the unanswered question
-            st.stop()
-
-        placeholder.empty()
-        msg = {
-            "role": "assistant",
-            "content": result.text,
-            "status": result.status,
-            "citations": [
-                {"label": f"S{n}", "source": s.chunk.source, "page": s.chunk.page_number, "text": s.chunk.text}
-                for n, s in result.cited_sources()
-            ],
-        }
+        msg = answer_with_agent(question) if research_mode else answer_with_rag(question)
         show_assistant_message(msg)
     st.session_state.messages.append(msg)
 

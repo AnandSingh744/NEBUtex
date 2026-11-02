@@ -14,7 +14,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import httpx
@@ -43,6 +43,15 @@ class LLMResponse:
     tokens_per_second: float  # generation speed
     time_to_first_token: float | None = None  # seconds until the first piece arrived (streaming only)
     truncated: bool = False  # True if the reply was cut off by MAX_OUTPUT_TOKENS
+    tool_calls: list["ToolCall"] = field(default_factory=list)  # tools the model asked us to run
+
+
+@dataclass
+class ToolCall:
+    """The model asking US to run a function. The model never runs anything itself."""
+    id: str
+    name: str
+    arguments: dict
 
 
 _ollama_client = ollama.Client(host=config.OLLAMA_HOST, timeout=config.REQUEST_TIMEOUT)
@@ -96,6 +105,8 @@ def check_llm() -> tuple[bool, str]:
 _cache: dict | None = None
 _cache_path: Path | None = None
 _cache_lock = threading.Lock()
+_unsaved = 0
+SAVE_EVERY = 10  # write the cache to disk after this many new replies, so an interrupted run loses little
 
 
 def enable_cache(path: str | Path) -> None:
@@ -106,17 +117,19 @@ def enable_cache(path: str | Path) -> None:
 
 
 def save_cache() -> None:
+    global _unsaved
     if _cache is None or _cache_path is None:
         return
     with _cache_lock:
+        _unsaved = 0
         tmp = _cache_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(_cache), encoding="utf-8")
         os.replace(tmp, _cache_path)
 
 
-def _cache_key(messages: list[dict], model: str, max_tokens: int) -> str:
+def _cache_key(messages: list[dict], model: str, max_tokens: int, tools: list[dict] | None = None) -> str:
     # Everything that can change the reply goes into the key.
-    request = [config.LLM_PROVIDER, config.LLM_BASE_URL, model, max_tokens, config.LLM_REASONING_EFFORT, messages]
+    request = [config.LLM_PROVIDER, config.LLM_BASE_URL, model, max_tokens, config.LLM_REASONING_EFFORT, messages, tools]
     return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
 
 
@@ -126,6 +139,7 @@ def chat(
     on_token: Callable[[str], None] | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict] | None = None,
 ) -> LLMResponse:
     """Send a list of {"role", "content"} messages and return the model's reply.
 
@@ -135,6 +149,10 @@ def chat(
     temperature overrides config.TEMPERATURE for this call (e.g. 0 for consistent grading).
     max_tokens overrides config.MAX_OUTPUT_TOKENS (e.g. a small cap for short JSON replies, so a
     model stuck repeating itself is cut off early).
+    tools: functions the model may ask to call (JSON Schema, OpenAI format). If it does, the reply has
+    tool_calls instead of (or as well as) text. Messages may include the neutral forms
+    {"role": "assistant", "content", "tool_calls": [ToolCall dicts]} and
+    {"role": "tool", "tool_call_id", "name", "content"}; they're converted for each provider.
 
     Transient failures are retried with exponential backoff. Anything that
     still fails is raised as LLMError.
@@ -142,24 +160,29 @@ def chat(
     effective_temperature = config.TEMPERATURE if temperature is None else temperature
     max_tokens = max_tokens or config.MAX_OUTPUT_TOKENS
     if _cache is not None and effective_temperature == 0:
-        key = _cache_key(messages, model, max_tokens)
+        key = _cache_key(messages, model, max_tokens, tools)
         with _cache_lock:
             hit = _cache.get(key)
         if hit is not None:
-            response = LLMResponse(**hit)
+            response = LLMResponse(**{**hit, "tool_calls": [ToolCall(**t) for t in hit.get("tool_calls", [])]})
             if on_token:
                 on_token(response.text)  # streaming callers still receive the text
             return response
-        response = _chat_with_retries(messages, model, on_token, temperature, max_tokens)
+        response = _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools)
+        global _unsaved
         with _cache_lock:
             _cache[key] = asdict(response)
+            _unsaved += 1
+            save_now = _unsaved >= SAVE_EVERY
+        if save_now:
+            save_cache()
         return response
-    return _chat_with_retries(messages, model, on_token, temperature, max_tokens)
+    return _chat_with_retries(messages, model, on_token, temperature, max_tokens, tools)
 
 
 def _chat_with_retries(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None,
-    temperature: float | None, max_tokens: int,
+    temperature: float | None, max_tokens: int, tools: list[dict] | None = None,
 ) -> LLMResponse:
     for attempt in range(1, config.MAX_ATTEMPTS + 1):
         stream_started = False
@@ -170,7 +193,9 @@ def _chat_with_retries(
             on_token(piece)
 
         try:
-            return _chat_once(messages, model, forward if on_token else None, temperature, max_tokens)
+            # Tool calls come back as one structured reply, so no streaming when tools are offered.
+            stream_to = forward if on_token and not tools else None
+            return _chat_once(messages, model, stream_to, temperature, max_tokens, tools)
         except ollama.ResponseError as e:
             if e.status_code == 404:
                 raise LLMError(f"Model '{model}' not found. Download it with: ollama pull {model}") from e
@@ -227,19 +252,49 @@ def _unreachable_message() -> str:
 
 def _chat_once(
     messages: list[dict], model: str, on_token: Callable[[str], None] | None,
-    temperature: float | None, max_tokens: int,
+    temperature: float | None, max_tokens: int, tools: list[dict] | None = None,
 ) -> LLMResponse:
     """One attempt at the LLM call, no error handling."""
     temperature = config.TEMPERATURE if temperature is None else temperature
     if config.LLM_PROVIDER == "ollama":
-        return _chat_once_ollama(messages, model, on_token, temperature, max_tokens)
-    return _chat_once_openai(messages, model, on_token, temperature, max_tokens)
+        return _chat_once_ollama(_messages_for_ollama(messages), model, on_token, temperature, max_tokens, tools)
+    return _chat_once_openai(_messages_for_openai(messages), model, on_token, temperature, max_tokens, tools)
+
+
+# Each provider writes tool-call messages slightly differently; we keep one neutral form and convert.
+
+def _messages_for_ollama(messages: list[dict]) -> list[dict]:
+    out = []
+    for m in messages:
+        if m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": [
+                {"function": {"name": t["name"], "arguments": t["arguments"]}} for t in m["tool_calls"]]})
+        elif m["role"] == "tool":
+            out.append({"role": "tool", "content": m["content"], "tool_name": m.get("name", "")})
+        else:
+            out.append(m)
+    return out
+
+
+def _messages_for_openai(messages: list[dict]) -> list[dict]:
+    out = []
+    for m in messages:
+        if m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or None, "tool_calls": [
+                {"id": t["id"], "type": "function", "function": {"name": t["name"], "arguments": json.dumps(t["arguments"])}}
+                for t in m["tool_calls"]]})
+        elif m["role"] == "tool":
+            out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+        else:
+            out.append(m)
+    return out
 
 
 # ---------- Ollama ----------
 
 def _chat_once_ollama(
-    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int,
+    tools: list[dict] | None = None,
 ) -> LLMResponse:
     options = {
         "temperature": temperature,
@@ -248,8 +303,13 @@ def _chat_once_ollama(
     }
 
     if on_token is None:
-        response = _ollama_client.chat(model=model, messages=messages, options=options)
-        return _ollama_to_llm_response(response, response.message.content)
+        response = _ollama_client.chat(model=model, messages=messages, options=options, tools=tools)
+        result = _ollama_to_llm_response(response, response.message.content or "")
+        result.tool_calls = [
+            ToolCall(id=f"call_{i}", name=t.function.name, arguments=dict(t.function.arguments or {}))
+            for i, t in enumerate(response.message.tool_calls or [])
+        ]
+        return result
 
     start = time.perf_counter()
     first_token_at = None
@@ -285,7 +345,8 @@ def _ollama_to_llm_response(
 # ---------- OpenAI-compatible APIs (Groq, OpenRouter, ...) ----------
 
 def _chat_once_openai(
-    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int
+    messages: list[dict], model: str, on_token: Callable[[str], None] | None, temperature: float, max_tokens: int,
+    tools: list[dict] | None = None,
 ) -> LLMResponse:
     client = _get_openai_client()
     params = {
@@ -296,14 +357,21 @@ def _chat_once_openai(
     }
     if config.LLM_REASONING_EFFORT:
         params["reasoning_effort"] = config.LLM_REASONING_EFFORT
+    if tools:
+        params["tools"] = tools
     start = time.perf_counter()
 
     if on_token is None:
         response = client.chat.completions.create(**params)
         choice = response.choices[0]
-        return _openai_to_llm_response(
+        result = _openai_to_llm_response(
             choice.message.content or "", response.usage, time.perf_counter() - start, None, choice.finish_reason
         )
+        result.tool_calls = [
+            ToolCall(id=t.id, name=t.function.name, arguments=_parse_arguments(t.function.arguments))
+            for t in (choice.message.tool_calls or [])
+        ]
+        return result
 
     first_token_at = None
     pieces = []
@@ -327,6 +395,15 @@ def _chat_once_openai(
     return _openai_to_llm_response(
         "".join(pieces), usage, time.perf_counter() - start, first_token_at, finish_reason
     )
+
+
+def _parse_arguments(raw: str) -> dict:
+    """OpenAI-style APIs send tool arguments as a JSON string; a malformed one becomes {} (the tool reports it)."""
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _openai_to_llm_response(
